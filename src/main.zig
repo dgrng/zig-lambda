@@ -4,8 +4,7 @@ const Allocator = std.mem.Allocator;
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer {
-        const leaked = gpa.deinit();
-        if (leaked == .leak) {
+        if (gpa.deinit() == .leak) {
             @panic("leaked");
         }
     }
@@ -40,7 +39,6 @@ const Runtime = struct {
 
     fn new(allocator: Allocator, h: *const fn (allocator: Allocator, body: []u8) anyerror![]u8) @This() {
         var http_client = std.http.Client{ .allocator = allocator };
-
         return .{
             .allocator = allocator,
             .http_client = http_client,
@@ -49,14 +47,16 @@ const Runtime = struct {
     }
 
     fn start(self: *Self) !void {
-        const api_endpoint = std.os.getenv("AWS_LAMBDA_RUNTIME_API") orelse "grng.dev";
+        const api_endpoint = std.os.getenv("AWS_LAMBDA_RUNTIME_API") orelse unreachable;
         try self.setEndpoint(api_endpoint);
 
         while (true) {
-            const ctx = try self.next();
+            var ctx = try self.next();
             defer self.allocator.free(ctx.body);
-            const res = try self.handler(self.allocator, ctx.body);
-            try self.respond(ctx, res);
+            defer self.allocator.free(ctx.request_id);
+            var res = try self.handler(self.allocator, ctx.body);
+            _ = res;
+            try self.respond(&ctx, "hello world");
         }
     }
 
@@ -67,28 +67,28 @@ const Runtime = struct {
         var req = try self.http_client.request(.GET, endpoint, client_headers, .{});
         defer req.deinit();
         try req.start();
-        try req.do();
-        var id = req.response.headers.getFirstValue("Lambda-Runtime-Aws-Request-Id") orelse "requestidnotfound";
+        try req.wait();
+        var id = req.response.headers.getFirstValue("Lambda-Runtime-Aws-Request-Id") orelse unreachable;
         var body = try req.reader().readAllAlloc(self.allocator, 1024 * 1024 * 10);
         return .{
-            .request_id = id,
+            .request_id = try self.allocator.dupe(u8, id),
             .body = body,
         };
     }
 
-    fn respond(self: *Self, ctx: Context, body: []const u8) !void {
-        const respondUrl = try std.fmt.allocPrint(self.allocator, "{s}{s}/response", .{ self.endpoint_next, ctx.request_id });
+    fn respond(self: *Self, ctx: *Context, body: []const u8) !void {
+        const respondUrl = try std.fmt.allocPrint(self.allocator, "{s}{s}/response", .{ self.endpoint_response, ctx.request_id });
         defer self.allocator.free(respondUrl);
         var uri = try std.Uri.parse(respondUrl);
         var client_headers = std.http.Headers{ .allocator = self.allocator };
         defer client_headers.deinit();
         var req = try self.http_client.request(.POST, uri, client_headers, .{});
+        req.transfer_encoding = .{ .content_length = body.len };
         defer req.deinit();
-        req.transfer_encoding = .{ .content_length = 14 };
         try req.start();
-        try req.writeAll(body);
+        _ = try req.write(body);
         try req.finish();
-        try req.do();
+        try req.wait();
     }
 
     fn setEndpoint(self: *Self, endoint: []const u8) !void {
