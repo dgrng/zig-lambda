@@ -1,5 +1,6 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const Event = @import("events.zig").Event;
 
 // Request Context
 const Context = struct {
@@ -32,7 +33,7 @@ pub fn Runtime(comptime EventType: type) type {
 
         const RuntimeError = error{ InvalidEventType, NextInvokeFailed, LambdaRuntimeEnvironmentVariableNotFound };
 
-        // event should be released inside handler function
+        // handler event is freed by runtime.
         pub fn new(allocator: Allocator, handler: *const fn (allocator: Allocator, event: EventType) anyerror![]const u8) Self {
             var http_client = std.http.Client{ .allocator = allocator };
             return .{
@@ -49,20 +50,15 @@ pub fn Runtime(comptime EventType: type) type {
             while (true) {
                 var ctx = try self.next();
                 defer ctx.deinit();
-                const res = self.handler(self.allocator, try self.convertToPayload(ctx.body)) catch |err| {
+                var e = try Event(EventType).init(self.allocator, ctx.body);
+                defer e.deinit();
+                const res = self.handler(self.allocator, e.payload) catch |err| {
                     try self.respondError(&ctx, err);
                     continue;
                 };
                 try self.respond(&ctx, res);
+                // todo define interface to free res.
             }
-        }
-
-        fn convertToPayload(self: *Self, body: []u8) !EventType {
-            return switch (EventType) {
-                []u8 => try self.allocator.dupe(u8, body),
-                APIGatewayProxyRequest => try APIGatewayProxyRequest.fromJson(self.allocator, body),
-                else => @compileError("event type not supported"),
-            };
         }
 
         fn next(self: *Self) !Context {
@@ -76,9 +72,9 @@ pub fn Runtime(comptime EventType: type) type {
             if (req.response.status != .ok) {
                 return error.NextInvokeFailed;
             }
-            var id = req.response.headers.getFirstValue("Lambda-Runtime-Aws-Request-Id") orelse return error.LambdaRuntimeEnvironmentVariableNotFound;
-            var trace_id = req.response.headers.getFirstValue("Lambda-Runtime-Trace-Id") orelse return error.LambdaRuntimeEnvironmentVariableNotFound;
-            var fn_arn = req.response.headers.getFirstValue("Lambda-Runtime-Invoked-Function-Arn") orelse return error.LambdaRuntimeEnvironmentVariableNotFound;
+            var id = req.response.headers.getFirstValue("Lambda-Runtime-Aws-Request-Id").?;
+            var trace_id = req.response.headers.getFirstValue("Lambda-Runtime-Trace-Id").?;
+            var fn_arn = req.response.headers.getFirstValue("Lambda-Runtime-Invoked-Function-Arn").?;
 
             var body = try req.reader().readAllAlloc(self.allocator, 1024 * 1024 * 10);
             return .{
@@ -149,22 +145,4 @@ pub fn Runtime(comptime EventType: type) type {
     };
 }
 
-const user_agent = "lambda-zig";
-
-pub const APIGatewayProxyRequest = struct {
-    resource: []const u8,
-    path: []const u8,
-    httpMethod: []const u8,
-    body: []const u8,
-    isBase64Encoded: ?bool = null,
-
-    const Self = @This();
-    pub fn fromJson(allocator: Allocator, body: []const u8) !Self {
-        var stream = std.json.TokenStream.init(body);
-        return try std.json.parse(Self, &stream, .{ .allocator = allocator, .ignore_unknown_fields = true });
-    }
-
-    pub fn deinit(self: Self, allocator: Allocator) void {
-        std.json.parseFree(Self, self, .{ .allocator = allocator, .ignore_unknown_fields = true });
-    }
-};
+const user_agent = "zig-lambda";
