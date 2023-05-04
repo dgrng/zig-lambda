@@ -13,22 +13,21 @@ pub fn main() !void {
         }
     }
     const allocator = gpa.allocator();
-    var runtime = Runtime(APIGatewayProxyRequest).new(allocator, &handler);
+    var runtime = Runtime.new(allocator, &handler);
     defer runtime.deinit();
     try runtime.start();
 }
 
-fn handler(allocator: Allocator, event: APIGatewayProxyRequest) anyerror![]const u8 {
+fn handler(allocator: Allocator, ctx: *const Context) anyerror!void {
     _ = allocator;
-    std.log.info("method: {s}\n", .{event.httpMethod});
-    std.log.info("path: {s}\n", .{event.path});
-    std.log.info("body: {s}\n", .{event.body});
-    return 
-    \\ {
-    \\ "message" : "ok",
-    \\ "status" : 200
-    \\ }
-    \\
+    std.log.info("body : {s}\n", .{ctx.event_payload});
+    var res =
+        \\ {
+        \\ "message" : "ok",
+        \\ "status" : 200
+        \\ }
+        \\
     ;
+    try ctx.respond(res);
 }
 ```
